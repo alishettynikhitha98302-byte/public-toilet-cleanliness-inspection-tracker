@@ -1,0 +1,23 @@
+import 'dotenv/config';
+import express from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
+import compression from 'compression';
+import { rateLimit } from 'express-rate-limit';
+import { apiRouter } from './routes/api.js';
+import { errorHandler } from './middleware/errors.js';
+
+const app = express();
+app.disable('x-powered-by');
+app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'"], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'", 'https://*.supabase.co'], fontSrc: ["'self'", 'data:'], objectSrc: ["'none'"], upgradeInsecureRequests: null } }}));
+app.use(cors({ origin: process.env.APP_ORIGIN || false, methods: ['GET','POST','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'], credentials: false }));
+app.use(compression());
+app.use(express.json({ limit: '1mb' }));
+app.use('/api', rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: 'draft-8', legacyHeaders: false }));
+app.use('/api', apiRouter);
+app.get('/api/health', (_req,res) => res.json({ data:{status:'ok'}, error:null }));
+app.use('/api', (_req,res) => res.status(404).json({ data:null, error:{ code:'NOT_FOUND', message:'API route not found' } }));
+app.use(express.static('public', { extensions:['html'] }));
+app.use(errorHandler);
+const port = Number(process.env.PORT || 3000);
+app.listen(port, () => console.log(`Toilet tracker listening on http://localhost:${port}`));

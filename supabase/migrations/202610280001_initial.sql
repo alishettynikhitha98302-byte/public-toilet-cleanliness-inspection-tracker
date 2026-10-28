@@ -1,0 +1,50 @@
+create extension if not exists pgcrypto;
+create type public.app_role as enum ('requester','operator','admin');
+create type public.inspection_status as enum ('scheduled','complete','cancelled');
+create type public.defect_status as enum ('open','in_progress','resolved','closed');
+create table public.profiles (id uuid primary key references auth.users(id) on delete cascade, full_name text not null default '', role public.app_role not null default 'requester', district text, created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+create table public.facilities (id uuid primary key default gen_random_uuid(), name text not null, address text not null, district text not null, facility_type text not null check(facility_type in ('public','park','transit','market','other')), accessibility boolean not null default false, inspection_interval_days int not null default 7 check(inspection_interval_days between 1 and 90), active boolean not null default true, created_by uuid not null references public.profiles(id), created_at timestamptz not null default now(), updated_at timestamptz not null default now(), unique(name,address));
+create index facilities_district_idx on public.facilities(district) where active;
+create table public.inspections (id uuid primary key default gen_random_uuid(), facility_id uuid not null references public.facilities(id), inspector_id uuid not null references public.profiles(id), scheduled_for date not null, status public.inspection_status not null default 'scheduled', checklist jsonb not null default '{}', notes text not null default '', evidence_url text, result text check(result in ('pass','fail')), created_at timestamptz not null default now(), completed_at timestamptz, check(status <> 'complete' or (checklist ?& array['cleanliness','supplies','fixtures','accessibility','safety'] and result is not null)));
+create index inspections_facility_date_idx on public.inspections(facility_id,scheduled_for desc);
+create index inspections_inspector_status_idx on public.inspections(inspector_id,status,scheduled_for);
+create table public.defects (id uuid primary key default gen_random_uuid(), inspection_id uuid not null references public.inspections(id), facility_id uuid not null references public.facilities(id), title text not null, description text not null default '', severity text not null check(severity in ('low','medium','high','critical')), status public.defect_status not null default 'open', assigned_to uuid references public.profiles(id), reported_by uuid not null references public.profiles(id), due_at timestamptz not null, resolution_note text, resolved_by uuid references public.profiles(id), resolved_at timestamptz, created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+create index defects_status_due_idx on public.defects(status,due_at);
+create index defects_assignee_idx on public.defects(assigned_to,status);
+create table public.reinspections (id uuid primary key default gen_random_uuid(), defect_id uuid not null references public.defects(id), inspector_id uuid not null references public.profiles(id), result text not null check(result in ('pass','fail')), notes text not null default '', created_at timestamptz not null default now());
+create index reinspections_defect_idx on public.reinspections(defect_id,created_at desc);
+create table public.audit_events (id bigint generated always as identity primary key, actor_id uuid references public.profiles(id), entity_type text not null, entity_id uuid not null, action text not null, before_state jsonb, after_state jsonb, created_at timestamptz not null default now());
+create index audit_entity_idx on public.audit_events(entity_type,entity_id,created_at desc);
+create or replace function public.set_updated_at() returns trigger language plpgsql as $$ begin new.updated_at=now(); return new; end $$;
+create trigger facilities_updated before update on public.facilities for each row execute function public.set_updated_at();
+create trigger defects_updated before update on public.defects for each row execute function public.set_updated_at();
+create or replace function public.audit_change() returns trigger language plpgsql security definer set search_path=public as $$ declare actor uuid; ent uuid; action_name text; before_json jsonb; after_json jsonb; begin actor=auth.uid(); ent=case when TG_OP='DELETE' then old.id else new.id end; action_name=lower(TG_OP); before_json=case when TG_OP in ('UPDATE','DELETE') then to_jsonb(old) else null end; after_json=case when TG_OP in ('INSERT','UPDATE') then to_jsonb(new) else null end; insert into public.audit_events(actor_id,entity_type,entity_id,action,before_state,after_state) values(actor,TG_TABLE_NAME,ent,action_name,before_json,after_json); return case when TG_OP='DELETE' then old else new end; end $$;
+create trigger audit_facilities after insert or update or delete on public.facilities for each row execute function public.audit_change();
+create trigger audit_inspections after insert or update or delete on public.inspections for each row execute function public.audit_change();
+create trigger audit_defects after insert or update or delete on public.defects for each row execute function public.audit_change();
+create trigger audit_reinspections after insert or update or delete on public.reinspections for each row execute function public.audit_change();
+create or replace function public.handle_new_user() returns trigger language plpgsql security definer set search_path=public as $$ begin insert into public.profiles(id,full_name) values(new.id,coalesce(new.raw_user_meta_data->>'full_name','')); return new; end $$;
+create trigger on_auth_user_created after insert on auth.users for each row execute function public.handle_new_user();
+create or replace function public.close_defect_after_reinspection() returns trigger language plpgsql security definer set search_path=public as $$ begin if new.result='pass' then update public.defects set status='closed' where id=new.defect_id and status='resolved'; elsif new.result='fail' then update public.defects set status='in_progress' where id=new.defect_id and status='resolved'; end if; return new; end $$;
+create trigger apply_reinspection after insert on public.reinspections for each row execute function public.close_defect_after_reinspection();
+create or replace function public.current_role() returns public.app_role language sql stable security definer set search_path=public as $$ select role from public.profiles where id=auth.uid() $$;
+alter table public.profiles enable row level security; alter table public.facilities enable row level security; alter table public.inspections enable row level security; alter table public.defects enable row level security; alter table public.reinspections enable row level security; alter table public.audit_events enable row level security;
+create policy "profile self or admin read" on public.profiles for select to authenticated using(id=auth.uid() or public.current_role() in ('operator','admin'));
+create policy "profile self update safe fields" on public.profiles for update to authenticated using(id=auth.uid()) with check(id=auth.uid() and role=public.current_role());
+create policy "public active facility directory" on public.facilities for select to anon using(active=true);
+grant select on public.facilities to anon;
+create policy "facilities operators read" on public.facilities for select to authenticated using(public.current_role() in ('operator','admin') or exists(select 1 from public.inspections i where i.facility_id=id and i.inspector_id=auth.uid()));
+create policy "operator manage facilities" on public.facilities for all to authenticated using(public.current_role() in ('operator','admin')) with check(public.current_role() in ('operator','admin'));
+create policy "inspection scope read" on public.inspections for select to authenticated using(public.current_role() in ('operator','admin') or inspector_id=auth.uid());
+create policy "operator insert inspection" on public.inspections for insert to authenticated with check(public.current_role() in ('operator','admin') and inspector_id=auth.uid());
+create policy "operator update inspection" on public.inspections for update to authenticated using(public.current_role() in ('operator','admin')) with check(public.current_role() in ('operator','admin'));
+create policy "defect scope read" on public.defects for select to authenticated using(public.current_role() in ('operator','admin') or reported_by=auth.uid() or assigned_to=auth.uid());
+create policy "operator create defects" on public.defects for insert to authenticated with check(public.current_role() in ('operator','admin') and reported_by=auth.uid());
+create policy "operator update defects" on public.defects for update to authenticated using(public.current_role() in ('operator','admin')) with check(public.current_role() in ('operator','admin'));
+create policy "reinspection scope read" on public.reinspections for select to authenticated using(public.current_role() in ('operator','admin') or inspector_id=auth.uid());
+create policy "operator create reinspection" on public.reinspections for insert to authenticated with check(public.current_role() in ('operator','admin') and inspector_id=auth.uid());
+create policy "audit visible to operators" on public.audit_events for select to authenticated using(public.current_role() in ('operator','admin'));
+
+
+
+\n

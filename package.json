@@ -1,0 +1,10 @@
+{
+  "name": "public-toilet-inspection-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Public Toilet Cleanliness and Inspection Compliance Tracker",
+  "type": "module",
+  "scripts": {"start":"node src/server.js", "dev":"node --watch src/server.js", "check":"node --check src/server.js && node --check src/routes/api.js && node --check public/app.js", "test":"node --test"},
+  "engines": {"node": ">=20"},
+  "dependencies": {"@supabase/supabase-js":"^2.57.0", "compression":"^1.8.1", "cors":"^2.8.5", "dotenv":"^16.6.1", "express":"^5.1.0", "express-rate-limit":"^8.1.0", "helmet":"^8.1.0", "zod":"^4.1.5"}
+}

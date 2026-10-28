@@ -1,0 +1,4 @@
+import { AppError } from '../middleware/errors.js';
+export async function rows(query) { const {data,error,count}=await query; if(error) { if(error.code==='23505') throw new AppError(409,'DUPLICATE','A matching record already exists.'); if(error.code==='23503') throw new AppError(400,'REFERENCE_ERROR','The selected related record does not exist.'); throw new AppError(error.code==='42501'?403:500,error.code==='42501'?'FORBIDDEN':'DATABASE_ERROR',error.code==='42501'?'You do not have access to this record.':'A database operation failed.'); } return {data,count}; }
+export async function roleOf(db,userId) { const {data,error}=await db.from('profiles').select('role, district').eq('id',userId).single(); if(error||!data) throw new AppError(403,'PROFILE_REQUIRED','Your account needs an operator profile.'); return data; }
+export function requireRole(role, allowed) { if(!allowed.includes(role)) throw new AppError(403,'FORBIDDEN','Your role cannot perform this action.'); }
